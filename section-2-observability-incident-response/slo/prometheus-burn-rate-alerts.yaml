@@ -1,0 +1,106 @@
+# =============================================================================
+# Multi-window, multi-burn-rate SLO alerts (Google SRE Workbook method).
+#
+# WHY this instead of threshold alerts (CPU>80%, pod restarted, queue>N):
+#   - Fires ONLY when the user-facing error budget is being burned fast enough
+#     to matter -> the pod that crashlooped but auto-healed in 5 min and didn't
+#     dent the SLI produces ZERO pages (that's the 60% auto-resolving noise).
+#   - Two windows (long AND short) must both breach -> transient spikes self-
+#     filter (short window resets), killing flapping.
+#   - Severity = urgency by construction: fast burn pages, slow burn tickets.
+#
+# Budget math for a 99.9% / 30d SLO (error budget = 0.1%):
+#   burn rate 14.4  -> exhausts the 30d budget in ~2 days   (page)
+#   burn rate 6     -> exhausts in ~5 days                   (page)
+#   burn rate 3     -> exhausts in ~10 days                  (ticket)
+#   burn rate 1     -> on pace to exactly exhaust in 30 days (ticket)
+#
+# Alert = (long-window burn > X) AND (short-window burn > X).
+# =============================================================================
+groups:
+  - name: event-ingestion-slo-burn-rate
+    rules:
+      # ---- FAST burn: 2% of budget in 1h -> PAGE -----------------------------
+      - alert: EventIngestionErrorBudgetBurnFast
+        expr: |
+          (
+            slo:ingestion_errors:ratio_rate1h > (14.4 * 0.001)
+            and
+            slo:ingestion_errors:ratio_rate5m > (14.4 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          team: ingestion
+          slo: availability
+          page: "true"
+        annotations:
+          summary: "Event-ingestion burning error budget very fast (14.4x)"
+          description: >-
+            5xx error ratio is >14.4x the sustainable rate over both 1h and 5m
+            windows. At this pace the 30-day error budget is gone in ~2 days.
+          runbook_url: "https://github.com/clevertap/platform/blob/main/section-2-observability-incident-response/runbooks/kubepodcrashlooping-event-ingestion.md"
+          dashboard_url: "https://grafana.clevertap.internal/d/event-ingestion-slo"
+
+      # ---- MEDIUM-fast burn: 5% in 6h -> PAGE --------------------------------
+      - alert: EventIngestionErrorBudgetBurnMedium
+        expr: |
+          (
+            slo:ingestion_errors:ratio_rate6h > (6 * 0.001)
+            and
+            slo:ingestion_errors:ratio_rate30m > (6 * 0.001)
+          )
+        for: 5m
+        labels:
+          severity: critical
+          team: ingestion
+          slo: availability
+          page: "true"
+        annotations:
+          summary: "Event-ingestion burning error budget fast (6x)"
+          description: >-
+            5xx error ratio is >6x the sustainable rate over both 6h and 30m
+            windows. Error budget exhausts in ~5 days at this pace.
+          runbook_url: "https://github.com/clevertap/platform/blob/main/section-2-observability-incident-response/runbooks/kubepodcrashlooping-event-ingestion.md"
+
+      # ---- SLOW burn: 10% in 1d -> TICKET (no page) --------------------------
+      - alert: EventIngestionErrorBudgetBurnSlow
+        expr: |
+          (
+            slo:ingestion_errors:ratio_rate1d > (3 * 0.001)
+            and
+            slo:ingestion_errors:ratio_rate2h > (3 * 0.001)
+          )
+        for: 15m
+        labels:
+          severity: warning
+          team: ingestion
+          slo: availability
+          page: "false"
+        annotations:
+          summary: "Event-ingestion slowly burning error budget (3x)"
+          description: >-
+            Sustained elevated 5xx over 1d and 2h windows. Not urgent, but the
+            budget will be exhausted in ~10 days — investigate within business hours.
+          runbook_url: "https://github.com/clevertap/platform/blob/main/section-2-observability-incident-response/runbooks/kubepodcrashlooping-event-ingestion.md"
+
+      # ---- VERY SLOW burn: on-pace -> TICKET ---------------------------------
+      - alert: EventIngestionErrorBudgetBurnVerySlow
+        expr: |
+          (
+            slo:ingestion_errors:ratio_rate3d > (1 * 0.001)
+            and
+            slo:ingestion_errors:ratio_rate6h > (1 * 0.001)
+          )
+        for: 1h
+        labels:
+          severity: warning
+          team: ingestion
+          slo: availability
+          page: "false"
+        annotations:
+          summary: "Event-ingestion on pace to exhaust 30d error budget"
+          description: >-
+            Low-grade sustained errors over 3d and 6h windows. Track and fix to
+            avoid SLO breach by month end.
+          runbook_url: "https://github.com/clevertap/platform/blob/main/section-2-observability-incident-response/runbooks/kubepodcrashlooping-event-ingestion.md"

@@ -1,0 +1,43 @@
+# =============================================================================
+# Example: a developer's self-serve ephemeral environment request.
+#
+# This is the ENTIRE interface a product engineer touches — a dozen lines, no
+# cloud/Terraform knowledge. They `kubectl apply` it (or fill the equivalent
+# Backstage form). A Crossplane Composition turns it into an isolated stack
+# (namespace + Postgres + Redis + a Kafka topic), with all security/cost/cleanup
+# guardrails baked in by the platform team. See docs/3b.
+#
+# What the developer canNOT do here (by design): pick an oversized instance,
+# request a public endpoint, skip tags, or omit a TTL — admission policy rejects
+# those, and the Composition caps sizes.
+# =============================================================================
+apiVersion: platform.clevertap.io/v1alpha1
+kind: EphemeralEnvironment
+metadata:
+  name: feat-event-dedup           # becomes the namespace + resource name prefix
+  namespace: dev-environments
+spec:
+  owner: jane.doe@clevertap.com    # required tag -> showback + expiry notices
+  team: ingestion                  # required tag -> per-team budget/quota
+  costCenter: cc-1234              # required tag -> chargeback (Section 4 FinOps)
+
+  # Mandatory TTL (max enforced by policy). Auto-reaped at expiry.
+  ttl: 72h
+
+  # Pick capabilities, not infrastructure. Sizes are t-shirts, capped by platform.
+  needs:
+    postgres:
+      enabled: true
+      size: small                  # small|medium  (large requires approval)
+      version: "16"
+    redis:
+      enabled: true
+      size: small
+    kafka:
+      enabled: true
+      topics:
+        - name: events.raw
+          partitions: 3
+
+  # Optional: seed with anonymized/synthetic data (never production PII).
+  seedDataset: synthetic-events-small

@@ -1,0 +1,131 @@
+# =============================================================================
+# Staging promotion — runs on merge to main.
+#
+# Flow:
+#   1. Resolve the immutable image:<sha> the PR stage already built (build once).
+#   2. Helm-deploy that exact image to the STAGING cluster.
+#   3. Run automated smoke tests against staging.
+#   4. MANUAL APPROVAL GATE (GitHub Environment "production" required reviewers).
+#   5. On approval, trigger the production canary (Argo Rollouts) — see
+#      docs/3a-cicd-pipeline-design.md and deploy/helm/.../rollout.yaml.
+#
+# Secrets are NOT injected here — the app gets them at runtime via ESO. The
+# pipeline only needs OIDC to reach EKS/ECR. See docs/3a (secrets section).
+# =============================================================================
+name: staging-promotion
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never cancel an in-flight deploy
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: event-ingestion
+  IMAGE_TAG: ${{ github.sha }}
+  CHART_PATH: deploy/helm/event-ingestion
+  RELEASE_NAME: event-ingestion
+  NAMESPACE: event-ingestion
+
+jobs:
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to staging
+    runs-on: ubuntu-latest
+    environment: staging          # tracked deployment; no approval required
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::444455556666:role/gha-deploy-staging
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image reference
+        id: meta
+        run: echo "image=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify image exists in ECR (built by PR stage)
+        run: aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG"
+
+      - name: Update kubeconfig for staging EKS
+        run: aws eks update-kubeconfig --name clevertap-staging-use1 --region "$AWS_REGION"
+
+      - uses: azure/setup-helm@v4
+
+      - name: Helm upgrade --install (staging values)
+        run: |
+          helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
+            --namespace "$NAMESPACE" --create-namespace \
+            --values "$CHART_PATH/values-staging.yaml" \
+            --set image.repository="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}" \
+            --set image.tag="$IMAGE_TAG" \
+            --atomic --timeout 5m --wait
+
+  # ---------------------------------------------------------------------------
+  smoke-tests:
+    name: Smoke tests (staging)
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::444455556666:role/gha-deploy-staging
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --name clevertap-staging-use1 --region "$AWS_REGION"
+      - name: Run smoke tests
+        run: ./scripts/smoke-test.sh
+        env:
+          BASE_URL: https://event-ingestion.staging.clevertap.internal
+
+  # ---------------------------------------------------------------------------
+  promote-to-production:
+    name: Promote to production (canary)
+    runs-on: ubuntu-latest
+    needs: smoke-tests
+    # GitHub Environment protection: required reviewers + optional wait timer.
+    # This IS the manual approval gate — enforced by GitHub, not bypassable in YAML.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::777788889999:role/gha-deploy-production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - run: aws eks update-kubeconfig --name clevertap-prod-use1 --region "$AWS_REGION"
+      - uses: azure/setup-helm@v4
+
+      # Helm renders/updates the Argo Rollout object; Argo Rollouts then drives
+      # the canary 10->50->100 with metric analysis + auto-rollback (no further
+      # manual steps unless analysis fails). See docs/3a + rollout.yaml.
+      - name: Apply production Rollout (triggers canary)
+        run: |
+          helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
+            --namespace "$NAMESPACE" --create-namespace \
+            --values "$CHART_PATH/values-production.yaml" \
+            --set image.tag="$IMAGE_TAG" \
+            --atomic --timeout 10m --wait
+
+      - name: Watch rollout status
+        run: |
+          kubectl argo rollouts -n "$NAMESPACE" status "$RELEASE_NAME" --timeout 15m

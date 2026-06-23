@@ -1,0 +1,33 @@
+# Argo Rollouts needs TWO services for canary traffic shaping:
+#  - stable: receives the stable (non-canary) traffic share
+#  - canary: receives the canary traffic share
+# The rollout's trafficRouting/selectors flip pods between them by weight.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "event-ingestion.fullname" . }}-stable
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "event-ingestion.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ .Values.containerPort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "event-ingestion.fullname" . }}-canary
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "event-ingestion.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ .Values.containerPort }}

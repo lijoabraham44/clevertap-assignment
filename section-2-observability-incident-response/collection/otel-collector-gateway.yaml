@@ -1,0 +1,135 @@
+# =============================================================================
+# OpenTelemetry Collector — GATEWAY (runs as a horizontally-scaled Deployment)
+#
+# Role: the single choke point where cost and noise are controlled before data
+# is stored. This is where the three hard problems are solved:
+#   1. CARDINALITY control on metrics (drop/aggregate high-card labels).
+#   2. TAIL-BASED sampling on traces (keep errors/slow/important, drop the rest).
+#   3. PII redaction (multi-tenant data must not leak into telemetry).
+# Then fan out per-pillar to the scalable backends.
+#
+# Why here and not the agent: tail sampling needs all spans of a trace together
+# (the agent's loadbalancing exporter guarantees that), and centralizing keeps
+# the policy in one reviewable place. See collection/README.md.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-gateway
+  namespace: observability
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+
+      # ---- PII redaction: strip tenant PII from telemetry attributes. --------
+      transform/redact:
+        trace_statements:
+          - context: span
+            statements:
+              - delete_key(attributes, "user.email")
+              - delete_key(attributes, "enduser.id")
+              - replace_pattern(attributes["http.url"], "(token|apikey)=[^&]+", "$$1=REDACTED")
+
+      # ---- CARDINALITY control on METRICS -----------------------------------
+      # Remove unbounded labels; keep only bounded, alert-worthy dimensions.
+      # tenant_id/campaign_id/device_id belong in traces+logs, NOT metrics.
+      transform/cardinality:
+        metric_statements:
+          - context: datapoint
+            statements:
+              - delete_key(attributes, "tenant_id")
+              - delete_key(attributes, "campaign_id")
+              - delete_key(attributes, "device_id")
+              - delete_key(attributes, "user_agent")
+              # Template the path so /v1/events/abc123 -> /v1/events/:id
+              - replace_pattern(attributes["http.route"], "/[0-9a-f]{8,}", "/:id")
+
+      # Allow-list: only metrics we explicitly approve get stored. New high-card
+      # metrics must be added here on review -> prevents silent cardinality creep.
+      filter/metric_allowlist:
+        metrics:
+          metric:
+            - 'not (name == "http_server_request_duration_seconds" or
+                    name == "http_server_requests_total" or
+                    name == "ingestion_events_total" or
+                    name == "ingestion_events_failed_total" or
+                    name == "kafka_producer_record_send_total" or
+                    IsMatch(name, "^(kube_|node_|container_).*"))'
+
+      # ---- TAIL-BASED sampling on TRACES ------------------------------------
+      # Decide AFTER seeing the whole trace: always keep errors + slow traces +
+      # enterprise tenants; probabilistically sample the boring successful rest.
+      tail_sampling:
+        decision_wait: 10s
+        num_traces: 200000
+        policies:
+          - name: errors
+            type: status_code
+            status_code: { status_codes: [ERROR] }
+          - name: slow
+            type: latency
+            latency: { threshold_ms: 1000 }
+          - name: enterprise-tenants
+            type: string_attribute
+            string_attribute:
+              key: tenant_tier
+              values: [enterprise]
+          - name: baseline-sample
+            type: probabilistic
+            probabilistic: { sampling_percentage: 5 }
+
+      batch:
+        send_batch_size: 8192
+        timeout: 5s
+
+    exporters:
+      # Metrics -> Prometheus-compatible store (AMP / Mimir) via remote write.
+      prometheusremotewrite:
+        endpoint: ${env:METRICS_REMOTE_WRITE_URL}
+        resource_to_telemetry_conversion: { enabled: true }
+        auth:
+          authenticator: sigv4auth
+
+      # Logs -> Loki.
+      otlphttp/loki:
+        endpoint: ${env:LOKI_OTLP_ENDPOINT}
+
+      # Traces -> Tempo.
+      otlp/tempo:
+        endpoint: ${env:TEMPO_OTLP_ENDPOINT}
+        tls: { insecure: false }
+
+    extensions:
+      sigv4auth:
+        region: ${env:AWS_REGION}
+
+    service:
+      extensions: [sigv4auth]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, transform/redact, tail_sampling, batch]
+          exporters: [otlp/tempo]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, transform/cardinality, filter/metric_allowlist, batch]
+          exporters: [prometheusremotewrite]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, transform/redact, batch]
+          exporters: [otlphttp/loki]
+      telemetry:
+        metrics:
+          level: detailed

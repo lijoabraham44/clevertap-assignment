@@ -1,0 +1,56 @@
+# =============================================================================
+# AnalysisTemplates — the AUTOMATED ROLLBACK TRIGGERS for the canary.
+#
+# Argo Rollouts runs these queries against Prometheus during the canary. Each
+# measurement must stay within bounds; if it fails `failureLimit` times, the
+# analysis fails -> the rollout auto-aborts and reverts to the stable version.
+# No human needed: a bad deploy hurts ~10% of traffic briefly, then self-heals.
+#
+# These mirror the Section 2 SLIs (success rate, p99 latency) so "good deploy"
+# is defined by the SAME user-facing signals we alert on.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: success-rate
+      interval: 1m
+      count: 5                 # take 5 measurements over the canary window
+      successCondition: result[0] >= 0.99   # >= 99% non-5xx
+      failureLimit: 1          # one bad measurement aborts the rollout
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc:9090
+          query: |
+            sum(rate(http_server_requests_total{service="{{`{{args.service-name}}`}}",status_class!="5xx"}[2m]))
+            /
+            sum(rate(http_server_requests_total{service="{{`{{args.service-name}}`}}"}[2m]))
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: latency-p99
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: latency-p99
+      interval: 1m
+      count: 5
+      successCondition: result[0] <= 0.5    # p99 <= 500ms
+      failureLimit: 1
+      provider:
+        prometheus:
+          address: http://prometheus.observability.svc:9090
+          query: |
+            histogram_quantile(0.99,
+              sum(rate(http_server_request_duration_seconds_bucket{service="{{`{{args.service-name}}`}}"}[2m])) by (le)
+            )

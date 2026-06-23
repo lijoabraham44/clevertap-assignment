@@ -1,0 +1,66 @@
+# =============================================================================
+# SLO definitions for the critical event-ingestion service (OpenSLO-style spec).
+#
+# This is the human- and machine-readable source of truth for the service's
+# reliability targets. The recording/alerting rules in this folder are the
+# Prometheus implementation of these SLOs. Keeping the spec separate means the
+# target (e.g. 99.9% -> 99.95%) can change in one reviewed place.
+#
+# Why these SLIs: the service's job is to accept inbound campaign events and
+# hand them to Kafka. Users care about (1) are my events accepted, and (2) are
+# they accepted quickly. So we measure request success ratio and latency — the
+# user-facing symptoms — not internal causes like CPU or pod restarts.
+# =============================================================================
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: event-ingestion-availability
+  labels:
+    service: event-ingestion
+    tier: critical
+spec:
+  service: event-ingestion
+  description: >-
+    99.9% of inbound campaign events are accepted successfully (non-5xx) over a
+    rolling 30-day window. Error budget = 0.1% of requests.
+  budgetingMethod: Occurrences
+  timeWindow:
+    - duration: 30d
+      isRolling: true
+  objectives:
+    - displayName: Successful ingestion
+      target: 0.999
+      # SLI = good events / total events. Implemented as recording rules.
+      indicator:
+        thresholdMetric:
+          metricSource:
+            type: Prometheus
+            spec:
+              good: sum(rate(ingestion_events_total{status_class!="5xx"}[5m]))
+              total: sum(rate(ingestion_events_total[5m]))
+---
+apiVersion: openslo/v1
+kind: SLO
+metadata:
+  name: event-ingestion-latency
+  labels:
+    service: event-ingestion
+    tier: critical
+spec:
+  service: event-ingestion
+  description: >-
+    99% of accepted ingestion requests complete in under 500ms over 30 days.
+  budgetingMethod: Occurrences
+  timeWindow:
+    - duration: 30d
+      isRolling: true
+  objectives:
+    - displayName: Fast ingestion
+      target: 0.99
+      indicator:
+        thresholdMetric:
+          metricSource:
+            type: Prometheus
+            spec:
+              good: sum(rate(http_server_request_duration_seconds_bucket{service="event-ingestion",le="0.5"}[5m]))
+              total: sum(rate(http_server_request_duration_seconds_count{service="event-ingestion"}[5m]))

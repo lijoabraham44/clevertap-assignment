@@ -1,0 +1,59 @@
+{
+  "tags": {
+    "team": {
+      "tag_key": { "@@assign": "team" },
+      "tag_value": {
+        "@@assign": [
+          "ingestion",
+          "platform",
+          "data",
+          "growth",
+          "shared"
+        ]
+      },
+      "enforced_for": {
+        "@@assign": [
+          "ec2:instance",
+          "ec2:volume",
+          "rds:db",
+          "elasticache:cluster",
+          "s3:bucket"
+        ]
+      }
+    },
+    "service": {
+      "tag_key": { "@@assign": "service" }
+    },
+    "environment": {
+      "tag_key": { "@@assign": "environment" },
+      "tag_value": {
+        "@@assign": ["prod", "staging", "dev", "ephemeral"]
+      },
+      "enforced_for": {
+        "@@assign": [
+          "ec2:instance",
+          "rds:db",
+          "elasticache:cluster"
+        ]
+      }
+    },
+    "cost-center": {
+      "tag_key": { "@@assign": "cost-center" }
+    },
+    "owner": {
+      "tag_key": { "@@assign": "owner" }
+    },
+    "managed-by": {
+      "tag_key": { "@@assign": "managed-by" },
+      "tag_value": {
+        "@@assign": ["terraform", "crossplane", "console"]
+      }
+    },
+    "data-residency": {
+      "tag_key": { "@@assign": "data-residency" },
+      "tag_value": {
+        "@@assign": ["global", "eu-only"]
+      }
+    }
+  }
+}

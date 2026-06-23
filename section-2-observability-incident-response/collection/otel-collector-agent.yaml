@@ -1,0 +1,120 @@
+# =============================================================================
+# OpenTelemetry Collector — AGENT (runs as a DaemonSet, one per node)
+#
+# Role: cheap, local collection close to the workload.
+#   - receive OTLP from app SDKs on the node
+#   - scrape node/pod /metrics (kubelet, cAdvisor, app exporters)
+#   - tail container logs
+#   - stamp consistent resource attributes, then forward EVERYTHING to the
+#     gateway over OTLP. The agent does NOT talk to backends directly — the
+#     gateway is the single choke point for sampling / cardinality / redaction.
+#
+# Why agent->gateway (see collection/README.md): keeps per-node footprint small,
+# centralizes the expensive/stateful processing (tail sampling needs all spans
+# of a trace in one place), and lets us change backends in one config.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-agent
+  namespace: observability
+data:
+  config.yaml: |
+    receivers:
+      # App telemetry (traces, metrics, logs) via OTLP from instrumented services.
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Infra/app metrics scraped on this node only (sharded by node to spread load).
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-pods
+              scrape_interval: 30s
+              kubernetes_sd_configs:
+                - role: pod
+              relabel_configs:
+                # Only scrape pods that opt in via annotation.
+                - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                  action: keep
+                  regex: "true"
+                # Restrict to pods on THIS node (agent is per-node).
+                - source_labels: [__meta_kubernetes_pod_node_name]
+                  action: keep
+                  regex: ${env:NODE_NAME}
+
+      # Container logs from the node filesystem.
+      filelog:
+        include: [/var/log/pods/*/*/*.log]
+        include_file_path: true
+        operators:
+          - type: container
+            id: container-parser
+
+    processors:
+      # Bound memory so the agent can never OOM the node.
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+
+      # Enrich every signal with k8s metadata for cross-pillar correlation.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.deployment.name
+            - k8s.node.name
+            - k8s.container.name
+
+      # Normalize the resource attributes the whole platform correlates on.
+      resource:
+        attributes:
+          - key: k8s.cluster.name
+            value: ${env:CLUSTER_NAME}
+            action: upsert
+          - key: cloud.region
+            value: ${env:AWS_REGION}
+            action: upsert
+
+      batch:
+        send_batch_size: 8192
+        timeout: 5s
+
+    exporters:
+      # Forward to the gateway over OTLP. Load-balancing exporter ensures all
+      # spans of a given trace land on the SAME gateway replica (required for
+      # tail-based sampling to see the whole trace).
+      loadbalancing:
+        protocol:
+          otlp:
+            tls:
+              insecure: false
+        resolver:
+          k8s:
+            service: otel-collector-gateway.observability.svc.cluster.local
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [loadbalancing]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [loadbalancing]
+        logs:
+          receivers: [otlp, filelog]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [loadbalancing]
+      telemetry:
+        metrics:
+          level: detailed

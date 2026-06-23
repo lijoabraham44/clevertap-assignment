@@ -1,0 +1,12 @@
+apiVersion: v2
+name: event-ingestion
+description: >-
+  Paved-road Helm chart for a containerized microservice on EKS. Deploys via an
+  Argo Rollouts canary, pulls secrets at runtime through External Secrets
+  Operator, and runs under an IRSA-scoped service account.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: platform-team
+    email: platform@clevertap.internal

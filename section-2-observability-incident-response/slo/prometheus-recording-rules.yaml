@@ -1,0 +1,80 @@
+# =============================================================================
+# Recording rules — pre-compute the SLI error ratio over multiple windows.
+#
+# Why recording rules: (1) burn-rate alerts must query several windows cheaply;
+# pre-aggregating avoids re-scanning raw series on every evaluation (cardinality
+# + cost control). (2) one canonical SLI definition reused by every window and
+# by dashboards -> no drift between what's alerted and what's shown.
+#
+# Metric: ingestion_events_total{status_class=2xx|4xx|5xx}
+# SLI error ratio = 5xx events / all events. (4xx are client errors, excluded
+# from the service's availability budget by design.)
+# =============================================================================
+groups:
+  - name: event-ingestion-slo-sli
+    interval: 30s
+    rules:
+      # ---- Availability SLI error ratio, one rule per burn-rate window -------
+      - record: slo:ingestion_errors:ratio_rate5m
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[5m]))
+          /
+          sum(rate(ingestion_events_total[5m]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate30m
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[30m]))
+          /
+          sum(rate(ingestion_events_total[30m]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate1h
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[1h]))
+          /
+          sum(rate(ingestion_events_total[1h]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate2h
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[2h]))
+          /
+          sum(rate(ingestion_events_total[2h]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate6h
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[6h]))
+          /
+          sum(rate(ingestion_events_total[6h]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate1d
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[1d]))
+          /
+          sum(rate(ingestion_events_total[1d]))
+        labels: { service: event-ingestion, slo: availability }
+
+      - record: slo:ingestion_errors:ratio_rate3d
+        expr: |
+          sum(rate(ingestion_events_total{status_class="5xx"}[3d]))
+          /
+          sum(rate(ingestion_events_total[3d]))
+        labels: { service: event-ingestion, slo: availability }
+
+      # ---- Static target + 30d error budget for dashboards ------------------
+      - record: slo:ingestion_availability:target
+        expr: "0.999"
+        labels: { service: event-ingestion, slo: availability }
+
+      # Remaining error budget (fraction) over the 30d window: 1 - (errors/target_budget)
+      - record: slo:ingestion_errors:budget_remaining_ratio
+        expr: |
+          1 - (
+            sum(increase(ingestion_events_total{status_class="5xx"}[30d]))
+            /
+            (sum(increase(ingestion_events_total[30d])) * (1 - 0.999))
+          )
+        labels: { service: event-ingestion, slo: availability }

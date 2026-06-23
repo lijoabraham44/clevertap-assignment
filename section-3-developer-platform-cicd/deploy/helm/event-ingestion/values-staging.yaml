@@ -1,0 +1,36 @@
+# Staging overlay — smaller footprint, faster/looser canary (staging validates
+# correctness, not production-grade safety), secrets sourced from staging path.
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+serviceAccount:
+  roleArn: arn:aws:iam::444455556666:role/clevertap-staging-use1-irsa-event-ingestion
+
+externalSecret:
+  data:
+    - secretKey: KAFKA_SASL_PASSWORD
+      remoteRef:
+        key: staging/event-ingestion/kafka
+        property: sasl_password
+    - secretKey: DB_PASSWORD
+      remoteRef:
+        key: staging/event-ingestion/db
+        property: password
+
+# In staging, go straight to 100% after a short bake — no need for a slow canary.
+rollout:
+  canary:
+    steps:
+      - setWeight: 50
+      - pause: { duration: 1m }
+      - setWeight: 100

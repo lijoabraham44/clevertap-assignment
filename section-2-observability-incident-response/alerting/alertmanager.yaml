@@ -1,0 +1,106 @@
+# =============================================================================
+# Alertmanager configuration — routing, grouping, inhibition, silencing.
+#
+# Even with SLO burn-rate alerts, HOW alerts are routed determines perceived
+# noise. This config:
+#   - routes by severity: page-worthy -> PagerDuty; warnings -> Slack ticket.
+#   - GROUPS related alerts so one incident = one notification, not 50.
+#   - INHIBITS downstream symptom alerts when a root-cause alert is already
+#     firing (e.g. don't page for KubePodCrashLooping if the SLO burn already paged).
+#   - mutes alerts during known maintenance windows.
+# These are the dedupe/suppression mechanics behind the noise-reduction in 2c.
+# =============================================================================
+global:
+  resolve_timeout: 5m
+  slack_api_url_file: /etc/alertmanager/secrets/slack-webhook
+  pagerduty_url: https://events.pagerduty.com/v2/enqueue
+
+# Templates for richer notifications (kept brief here).
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  # Group alerts that share these labels into a single notification thread.
+  group_by: [alertname, service, cluster]
+  group_wait: 30s        # wait to collect related alerts before first notify
+  group_interval: 5m     # wait before notifying about new alerts in a group
+  repeat_interval: 4h    # re-notify cadence for still-firing alerts
+  receiver: slack-noise  # default: low-priority Slack channel (catch-all)
+
+  routes:
+    # --- Page-worthy: anything labelled page="true" goes to PagerDuty. --------
+    - matchers:
+        - page = "true"
+      receiver: pagerduty-critical
+      group_wait: 0s          # page immediately
+      continue: true          # also mirror to Slack incident channel
+    - matchers:
+        - page = "true"
+      receiver: slack-incidents
+
+    # --- Warnings / slow burns: ticket channel, never page. ------------------
+    - matchers:
+        - severity = "warning"
+      receiver: slack-tickets
+      group_interval: 30m
+      repeat_interval: 12h
+
+    # --- Watchdog / deadman's-switch (always-firing heartbeat). --------------
+    - matchers:
+        - alertname = "Watchdog"
+      receiver: deadmansswitch
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+
+# Suppress noisy symptom alerts when a higher-level cause is already firing.
+inhibit_rules:
+  # If the SLO is burning (we already paged), don't ALSO page for the pod-level
+  # symptom on the same service.
+  - source_matchers:
+      - alertname = "EventIngestionErrorBudgetBurnFast"
+    target_matchers:
+      - alertname = "KubePodCrashLooping"
+      - service = "event-ingestion"
+    equal: [service, cluster]
+
+  # A critical alert inhibits the warning version of the same alert/service.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: [alertname, service, cluster]
+
+receivers:
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty-key
+        severity: critical
+        description: '{{ .CommonAnnotations.summary }}'
+        details:
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+          dashboard: '{{ .CommonAnnotations.dashboard_url }}'
+
+  - name: slack-incidents
+    slack_configs:
+      - channel: "#incidents"
+        title: '{{ .CommonAnnotations.summary }}'
+        text: "{{ .CommonAnnotations.description }}\nRunbook: {{ .CommonAnnotations.runbook_url }}"
+        send_resolved: true
+
+  - name: slack-tickets
+    slack_configs:
+      - channel: "#alerts-tickets"
+        title: '[warning] {{ .CommonAnnotations.summary }}'
+        send_resolved: true
+
+  - name: slack-noise
+    slack_configs:
+      - channel: "#alerts-firehose"
+        send_resolved: true
+
+  # Deadman's switch: an external monitor pages if this STOPS arriving, proving
+  # the whole alerting pipeline is alive (catches "silence because monitoring is down").
+  - name: deadmansswitch
+    webhook_configs:
+      - url: https://deadmanssnitch.com/snitch/REPLACE_ME

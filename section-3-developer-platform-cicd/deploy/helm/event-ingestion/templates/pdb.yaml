@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled -}}
+# Protects availability during voluntary disruptions (node drains, Spot reclaim,
+# rollouts). Referenced by the Section 2 runbook's "availability during scale-in".
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "event-ingestion.fullname" . }}
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "event-ingestion.selectorLabels" . | nindent 6 }}
+{{- end }}

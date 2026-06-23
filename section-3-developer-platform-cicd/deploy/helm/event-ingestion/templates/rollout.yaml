@@ -1,0 +1,89 @@
+# =============================================================================
+# Argo Rollouts canary — the production progressive-delivery object.
+#
+# Instead of a Deployment's all-at-once rolling update, this shifts a small %
+# of real traffic to the new version, runs metric ANALYSIS in the background,
+# and only proceeds (10 -> 50 -> 100) if the new version is healthy. If analysis
+# fails at any step, Argo Rollouts AUTOMATICALLY aborts and reverts to stable.
+# This is the core of "deploy without fear" -> higher velocity.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "event-ingestion.fullname" . }}
+  labels:
+    {{- include "event-ingestion.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "event-ingestion.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "event-ingestion.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.containerPort | quote }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: {{ include "event-ingestion.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          # Non-secret config from values; secrets from the ESO-synced Secret.
+          env:
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- if .Values.externalSecret.enabled }}
+          envFrom:
+            - secretRef:
+                name: {{ include "event-ingestion.fullname" . }}-secrets
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+  strategy:
+    canary:
+      stableService: {{ include "event-ingestion.fullname" . }}-stable
+      canaryService: {{ include "event-ingestion.fullname" . }}-canary
+      # Run analysis in the background for the whole rollout; a failed run at any
+      # step triggers automatic abort + rollback to the stable ReplicaSet.
+      analysis:
+        templates:
+          {{- range .Values.rollout.analysis.templates }}
+          - templateName: {{ . }}
+          {{- end }}
+        startingStep: {{ .Values.rollout.analysis.startingStep }}
+        args:
+          - name: service-name
+            value: {{ include "event-ingestion.fullname" . }}-canary
+      steps:
+        {{- toYaml .Values.rollout.canary.steps | nindent 8 }}

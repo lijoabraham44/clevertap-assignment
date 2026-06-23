@@ -1,0 +1,38 @@
+# Production overlay — full HA, full canary with metric analysis + auto-rollback.
+replicaCount: 6
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: "1Gi"
+
+autoscaling:
+  enabled: true
+  minReplicas: 6
+  maxReplicas: 60          # headroom for 10–50x campaign spikes
+  targetCPUUtilizationPercentage: 65
+
+serviceAccount:
+  roleArn: arn:aws:iam::777788889999:role/clevertap-prod-use1-irsa-event-ingestion
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 4
+
+# Conservative production canary: 10 -> 50 -> 100 with analysis gating each step.
+rollout:
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: { duration: 5m }
+      - setWeight: 50
+      - pause: { duration: 10m }
+      - setWeight: 100
+  analysis:
+    templates:
+      - success-rate
+      - latency-p99
+    startingStep: 1
